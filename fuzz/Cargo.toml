@@ -1,0 +1,80 @@
+[package]
+name = "sql-scalar-text-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+chrono = { version = "0.4", default-features = false, features = ["alloc"] }
+bigdecimal = { version = "0.4", default-features = false }
+
+[dependencies.sql-scalar-text]
+path = ".."
+features = ["decimal"]
+
+[[bin]]
+name = "fuzz_timestamp"
+path = "fuzz_targets/fuzz_timestamp.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_timestamp_tz"
+path = "fuzz_targets/fuzz_timestamp_tz.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_date"
+path = "fuzz_targets/fuzz_date.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_time"
+path = "fuzz_targets/fuzz_time.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_bool"
+path = "fuzz_targets/fuzz_bool.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_pg_bytea_hex"
+path = "fuzz_targets/fuzz_pg_bytea_hex.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_i64"
+path = "fuzz_targets/fuzz_i64.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_f64"
+path = "fuzz_targets/fuzz_f64.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_decimal"
+path = "fuzz_targets/fuzz_decimal.rs"
+test = false
+doc = false
+bench = false

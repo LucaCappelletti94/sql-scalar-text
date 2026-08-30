@@ -1,0 +1,205 @@
+use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
+use diesel::prelude::*;
+use diesel::sql_types::Text;
+use sql_scalar_text::{parse_bool, parse_date, parse_f64, parse_i64, parse_time, parse_timestamp};
+
+diesel::table! {
+    scalars (id) {
+        id -> Integer,
+        txt -> Text,
+    }
+}
+
+use scalars::dsl as s;
+
+#[derive(Insertable)]
+#[diesel(table_name = scalars)]
+struct Row {
+    id: i32,
+    txt: String,
+}
+
+fn mem_conn() -> SqliteConnection {
+    let mut conn = SqliteConnection::establish(":memory:").expect("open sqlite memory db");
+    // DDL: Diesel migration DSL does not cover CREATE TABLE for ad-hoc schemas.
+    diesel::sql_query("CREATE TABLE scalars (id INTEGER PRIMARY KEY, txt TEXT NOT NULL)")
+        .execute(&mut conn)
+        .expect("create scalars table");
+    conn
+}
+
+fn sqlite_text(conn: &mut SqliteConnection, expr: &str) -> String {
+    diesel::select(diesel::dsl::sql::<Text>(expr))
+        .get_result(conn)
+        .unwrap_or_else(|e| panic!("sqlite_text({expr}): {e}"))
+}
+
+fn read_txt(conn: &mut SqliteConnection, id: i32) -> String {
+    s::scalars
+        .select(s::txt)
+        .filter(s::id.eq(id))
+        .first(conn)
+        .unwrap_or_else(|e| panic!("read id={id}: {e}"))
+}
+
+#[test]
+fn sqlite_timestamp_iso_text() {
+    let mut conn = mem_conn();
+
+    let rows: &[(i32, &str, NaiveDateTime)] = &[
+        (
+            1,
+            "2024-01-15 10:30:45",
+            NaiveDate::from_ymd_opt(2024, 1, 15)
+                .unwrap()
+                .and_hms_opt(10, 30, 45)
+                .unwrap(),
+        ),
+        (
+            2,
+            "2024-01-15 10:30:45.123456",
+            NaiveDate::from_ymd_opt(2024, 1, 15)
+                .unwrap()
+                .and_hms_micro_opt(10, 30, 45, 123456)
+                .unwrap(),
+        ),
+        (
+            3,
+            "2024-02-29 23:59:59",
+            NaiveDate::from_ymd_opt(2024, 2, 29)
+                .unwrap()
+                .and_hms_opt(23, 59, 59)
+                .unwrap(),
+        ),
+    ];
+
+    for (id, txt, expected) in rows {
+        diesel::insert_into(s::scalars)
+            .values(Row {
+                id: *id,
+                txt: txt.to_string(),
+            })
+            .execute(&mut conn)
+            .expect("insert row");
+
+        let read = read_txt(&mut conn, *id);
+        let parsed = parse_timestamp(&read).expect("parse timestamp");
+        assert_eq!(parsed, *expected, "id={id} text={txt}");
+    }
+}
+
+#[test]
+fn sqlite_date_iso_text() {
+    let mut conn = mem_conn();
+
+    let rows: &[(i32, &str, NaiveDate)] = &[
+        (
+            1,
+            "2024-01-15",
+            NaiveDate::from_ymd_opt(2024, 1, 15).unwrap(),
+        ),
+        (
+            2,
+            "2024-02-29",
+            NaiveDate::from_ymd_opt(2024, 2, 29).unwrap(),
+        ),
+        (
+            3,
+            "2000-01-01",
+            NaiveDate::from_ymd_opt(2000, 1, 1).unwrap(),
+        ),
+    ];
+
+    for (id, txt, expected) in rows {
+        diesel::insert_into(s::scalars)
+            .values(Row {
+                id: *id,
+                txt: txt.to_string(),
+            })
+            .execute(&mut conn)
+            .expect("insert row");
+
+        let read = read_txt(&mut conn, *id);
+        let parsed = parse_date(&read).expect("parse date");
+        assert_eq!(parsed, *expected, "id={id} text={txt}");
+    }
+}
+
+#[test]
+fn sqlite_time_iso_text() {
+    let mut conn = mem_conn();
+
+    let rows: &[(i32, &str, NaiveTime)] = &[
+        (1, "10:30:45", NaiveTime::from_hms_opt(10, 30, 45).unwrap()),
+        (
+            2,
+            "10:30:45.123456",
+            NaiveTime::from_hms_micro_opt(10, 30, 45, 123456).unwrap(),
+        ),
+        (3, "23:59:59", NaiveTime::from_hms_opt(23, 59, 59).unwrap()),
+    ];
+
+    for (id, txt, expected) in rows {
+        diesel::insert_into(s::scalars)
+            .values(Row {
+                id: *id,
+                txt: txt.to_string(),
+            })
+            .execute(&mut conn)
+            .expect("insert row");
+
+        let read = read_txt(&mut conn, *id);
+        let parsed = parse_time(&read).expect("parse time");
+        assert_eq!(parsed, *expected, "id={id} text={txt}");
+    }
+}
+
+#[test]
+fn sqlite_bool_convention() {
+    let mut conn = mem_conn();
+
+    let rows: &[(i32, &str, bool)] = &[(1, "1", true), (2, "0", false)];
+
+    for (id, txt, expected) in rows {
+        diesel::insert_into(s::scalars)
+            .values(Row {
+                id: *id,
+                txt: txt.to_string(),
+            })
+            .execute(&mut conn)
+            .expect("insert row");
+
+        let read = read_txt(&mut conn, *id);
+        let parsed = parse_bool(&read).expect("parse bool");
+        assert_eq!(parsed, *expected, "id={id} text={txt}");
+    }
+}
+
+#[test]
+fn sqlite_integer_and_float_text() {
+    let mut conn = mem_conn();
+
+    let i64_cases: &[(&str, i64)] = &[
+        ("CAST(0 AS TEXT)", 0),
+        ("CAST(42 AS TEXT)", 42),
+        ("CAST(-42 AS TEXT)", -42),
+        ("CAST(9223372036854775807 AS TEXT)", i64::MAX),
+        ("CAST(-9223372036854775808 AS TEXT)", i64::MIN),
+    ];
+    for &(expr, expected) in i64_cases {
+        let text = sqlite_text(&mut conn, expr);
+        let got = parse_i64(&text).unwrap_or_else(|| panic!("parse_i64: {text:?} (expr={expr})"));
+        assert_eq!(got, expected, "expr={expr} text={text:?}");
+    }
+
+    let f64_cases: &[(&str, f64)] = &[
+        ("CAST(1.5 AS TEXT)", 1.5),
+        ("CAST(-2.5 AS TEXT)", -2.5),
+        ("CAST(1e20 AS TEXT)", 1e20_f64),
+    ];
+    for &(expr, expected) in f64_cases {
+        let text = sqlite_text(&mut conn, expr);
+        let got = parse_f64(&text).unwrap_or_else(|| panic!("parse_f64: {text:?} (expr={expr})"));
+        assert_eq!(got, expected, "expr={expr} text={text:?}");
+    }
+}
