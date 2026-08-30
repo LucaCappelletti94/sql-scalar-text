@@ -92,9 +92,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-fuzz
+      - run: cargo +nightly install cargo-fuzz --version 0.13.2 --locked
       - run: cd fuzz && cargo +nightly fuzz build -a
       - run: cd fuzz && cargo +nightly fuzz run fuzz_timestamp -- -dict=sql_scalars.dict -max_len=100 -runs=100
       - run: cd fuzz && cargo +nightly fuzz run fuzz_timestamp_tz -- -dict=sql_scalars.dict -max_len=100 -runs=100
