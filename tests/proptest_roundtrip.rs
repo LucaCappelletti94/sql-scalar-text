@@ -22,11 +22,11 @@ fn datetime_strategy() -> impl Strategy<Value = NaiveDateTime> {
 }
 
 fn offset_secs_strategy() -> impl Strategy<Value = i32> {
-    (-720i32..=720).prop_map(|m| m * 60)
+    (-1439i32..=1439).prop_map(|m| m * 60)
 }
 
 fn whole_hour_offset_secs_strategy() -> impl Strategy<Value = i32> {
-    (-12i32..=12).prop_map(|h| h * 3600)
+    (-23i32..=23).prop_map(|h| h * 3600)
 }
 
 fn strip_frac_zeros(s: &str) -> String {

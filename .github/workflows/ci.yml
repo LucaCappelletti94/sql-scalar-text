@@ -28,6 +28,7 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
       - run: cargo check --target wasm32-unknown-unknown --no-default-features
+      - run: cargo check --target wasm32-unknown-unknown --all-features
 
   fuzz:
     name: Fuzz Smoke
