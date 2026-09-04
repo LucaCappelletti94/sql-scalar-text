@@ -18,6 +18,7 @@
 //! run still leaves its container behind.
 
 use std::{
+    io::Write,
     panic::{AssertUnwindSafe, catch_unwind},
     sync::{Mutex, Once, PoisonError},
 };
@@ -53,7 +54,12 @@ extern "C" fn drop_every_slot() {
 pub fn run_drops(drops: Vec<Box<dyn FnOnce() + Send>>) {
     for drop_slot in drops {
         if catch_unwind(AssertUnwindSafe(drop_slot)).is_err() {
-            eprintln!("exit slot: a value's destructor panicked; continuing with the rest");
+            // Not `eprintln!`: it panics when stderr is closed, and nothing
+            // here may unwind.
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "exit slot: a value's destructor panicked; continuing with the rest"
+            );
         }
     }
 }
