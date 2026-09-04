@@ -1,3 +1,5 @@
+#[path = "support/containers.rs"]
+mod containers;
 #[path = "support/exit_slot.rs"]
 mod exit_slot;
 
@@ -19,11 +21,13 @@ static MYSQL: exit_slot::ExitSlot<testcontainers::Container<GenericImage>> =
 fn mysql_port() -> u16 {
     MYSQL.with(
         || {
+            containers::sweep_abandoned();
             GenericImage::new("mysql", "8.4.11")
                 .with_exposed_port(3306.tcp())
                 .with_wait_for(WaitFor::message_on_stderr("port: 3306"))
                 .with_env_var("MYSQL_ROOT_PASSWORD", "root")
                 .with_env_var("MYSQL_DATABASE", "test")
+                .with_labels(containers::labels("mysql"))
                 .start()
                 .expect("start mysql 8.4.11")
         },

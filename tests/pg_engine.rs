@@ -1,3 +1,5 @@
+#[path = "support/containers.rs"]
+mod containers;
 #[path = "support/exit_slot.rs"]
 mod exit_slot;
 
@@ -22,6 +24,7 @@ static PG: exit_slot::ExitSlot<testcontainers::Container<GenericImage>> =
 fn pg_port() -> u16 {
     PG.with(
         || {
+            containers::sweep_abandoned();
             GenericImage::new("postgres", "16.15-alpine")
                 .with_exposed_port(5432.tcp())
                 .with_wait_for(WaitFor::message_on_stderr(
@@ -30,6 +33,7 @@ fn pg_port() -> u16 {
                 .with_env_var("POSTGRES_PASSWORD", "postgres")
                 .with_env_var("POSTGRES_USER", "postgres")
                 .with_env_var("POSTGRES_DB", "postgres")
+                .with_labels(containers::labels("postgres"))
                 .start()
                 .expect("start postgres 16.15-alpine")
         },
