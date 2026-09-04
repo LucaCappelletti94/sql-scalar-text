@@ -12,8 +12,10 @@
 //! kept in a `static` therefore never removes its container, and nothing else
 //! does; testcontainers 0.27 has no reaper. The slot fills once, like
 //! `OnceLock`, and registers one `atexit` callback that drops every filled
-//! slot: a normal finish, a failed test and a panic all pass through it.
-//! `SIGKILL` does not; that is the one path this cannot cover.
+//! slot: a normal finish, a failed test and a panic all pass through it. A
+//! terminating signal does not: `SIGINT`, `SIGTERM` and `SIGKILL` end the
+//! process without libc's exit processing, so an interrupted or timed-out
+//! run still leaves its container behind.
 
 use std::sync::{Mutex, Once, PoisonError};
 
