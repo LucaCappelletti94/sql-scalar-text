@@ -28,6 +28,7 @@ testcontainers-modules = { version = "0.15", features = ["postgres", "mysql", "b
 diesel = { version = "2.3", features = ["postgres", "mysql", "sqlite"] }
 proptest = "1.11"
 criterion = { version = "0.8", features = ["html_reports"] }
+parking_lot = "0.12.5"
 
 [[bench]]
 name = "scalar_parsing"
