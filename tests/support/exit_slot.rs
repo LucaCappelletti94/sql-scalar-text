@@ -17,7 +17,10 @@
 //! process without libc's exit processing, so an interrupted or timed-out
 //! run still leaves its container behind.
 
-use std::sync::{Mutex, Once, PoisonError};
+use std::{
+    panic::{AssertUnwindSafe, catch_unwind},
+    sync::{Mutex, Once, PoisonError},
+};
 
 pub struct ExitSlot<T>(Mutex<Option<T>>);
 
@@ -35,10 +38,23 @@ unsafe extern "C" {
     fn atexit(callback: extern "C" fn()) -> i32;
 }
 
+/// The `atexit` callback. A panic unwinding out of an `extern "C"` function
+/// aborts the process, which would fail a green test run at the last moment
+/// and leave every later slot undropped, so nothing here may unwind.
 extern "C" fn drop_every_slot() {
-    let drops = std::mem::take(&mut *DROPS.lock().unwrap_or_else(PoisonError::into_inner));
+    run_drops(std::mem::take(
+        &mut *DROPS.lock().unwrap_or_else(PoisonError::into_inner),
+    ));
+}
+
+/// Run each drop in order, containing a panic so the rest still run. A
+/// `Drop` that panics is a defect in the value's type; the exit path
+/// survives it rather than compounding it into an abort.
+pub fn run_drops(drops: Vec<Box<dyn FnOnce() + Send>>) {
     for drop_slot in drops {
-        drop_slot();
+        if catch_unwind(AssertUnwindSafe(drop_slot)).is_err() {
+            eprintln!("exit slot: a value's destructor panicked; continuing with the rest");
+        }
     }
 }
 
