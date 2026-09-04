@@ -17,10 +17,11 @@
 //! process without libc's exit processing, so an interrupted or timed-out
 //! run still leaves its container behind.
 
+use parking_lot::Mutex;
 use std::{
     io::Write,
     panic::{AssertUnwindSafe, catch_unwind},
-    sync::{Mutex, Once, PoisonError},
+    sync::Once,
 };
 
 pub struct ExitSlot<T>(Mutex<Option<T>>);
@@ -39,13 +40,28 @@ unsafe extern "C" {
     fn atexit(callback: extern "C" fn()) -> i32;
 }
 
+type Drops = Mutex<Vec<Box<dyn FnOnce() + Send>>>;
+
 /// The `atexit` callback. A panic unwinding out of an `extern "C"` function
 /// aborts the process, which would fail a green test run at the last moment
 /// and leave every later slot undropped, so nothing here may unwind.
 extern "C" fn drop_every_slot() {
-    run_drops(std::mem::take(
-        &mut *DROPS.lock().unwrap_or_else(PoisonError::into_inner),
-    ));
+    drain(&DROPS);
+}
+
+/// Run every registered drop, in batches, until the registry is empty.
+///
+/// The lock is released before each batch runs: a destructor may fill
+/// another slot, which registers on the same registry, and that late
+/// registration must both not deadlock and still be run before exit.
+fn drain(registry: &Drops) {
+    loop {
+        let batch = std::mem::take(&mut *registry.lock());
+        if batch.is_empty() {
+            return;
+        }
+        run_drops(batch);
+    }
 }
 
 /// Run each drop in order, containing a panic so the rest still run. A
@@ -79,7 +95,7 @@ impl<T: Send + 'static> ExitSlot<T> {
     /// stored, so the value `init` produced is dropped by unwinding rather
     /// than kept with nothing left to drop it.
     pub fn with<R>(&'static self, init: impl FnOnce() -> T, read: impl FnOnce(&T) -> R) -> R {
-        let mut slot = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut slot = self.0.lock();
         if slot.is_none() {
             let value = init();
             REGISTER.call_once(|| {
@@ -92,16 +108,51 @@ impl<T: Send + 'static> ExitSlot<T> {
                     "register the exit callback that drops the slot"
                 );
             });
-            DROPS
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .push(Box::new(move || self.clear()));
+            DROPS.lock().push(Box::new(move || self.clear()));
             *slot = Some(value);
         }
         read(slot.as_ref().expect("filled just above"))
     }
 
+    /// Take the value under the lock, drop it after: a destructor must never
+    /// run while the slot's own mutex is held.
     fn clear(&self) {
-        drop(self.0.lock().unwrap_or_else(PoisonError::into_inner).take());
+        let value = self.0.lock().take();
+        drop(value);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::*;
+
+    #[test]
+    fn a_drop_registered_during_the_drain_runs_and_does_not_deadlock() {
+        static REGISTRY: Drops = Mutex::new(Vec::new());
+        static SECOND_RAN: AtomicBool = AtomicBool::new(false);
+        REGISTRY.lock().push(Box::new(|| {
+            // What a destructor filling another slot does: register on the
+            // registry being drained.
+            REGISTRY
+                .lock()
+                .push(Box::new(|| SECOND_RAN.store(true, Ordering::Relaxed)));
+        }));
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            drain(&REGISTRY);
+            let _ = done.send(());
+        });
+        assert!(
+            finished
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .is_ok(),
+            "the drain held its registry lock while running a drop: deadlock"
+        );
+        assert!(
+            SECOND_RAN.load(Ordering::Relaxed),
+            "a drop registered during the drain never ran"
+        );
     }
 }
