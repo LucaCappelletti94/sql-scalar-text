@@ -1,4 +1,5 @@
-use std::sync::OnceLock;
+#[path = "support/exit_slot.rs"]
+mod exit_slot;
 
 use chrono::{NaiveDate, NaiveTime};
 use diesel::prelude::*;
@@ -10,11 +11,14 @@ use testcontainers::{
     runners::SyncRunner,
 };
 
-static MYSQL: OnceLock<testcontainers::Container<GenericImage>> = OnceLock::new();
+/// One container per test binary, removed when the binary exits; a plain
+/// `static` would keep it running forever, see `exit_slot`.
+static MYSQL: exit_slot::ExitSlot<testcontainers::Container<GenericImage>> =
+    exit_slot::ExitSlot::new();
 
 fn mysql_port() -> u16 {
-    MYSQL
-        .get_or_init(|| {
+    MYSQL.with(
+        || {
             GenericImage::new("mysql", "8.4.11")
                 .with_exposed_port(3306.tcp())
                 .with_wait_for(WaitFor::message_on_stderr("port: 3306"))
@@ -22,9 +26,9 @@ fn mysql_port() -> u16 {
                 .with_env_var("MYSQL_DATABASE", "test")
                 .start()
                 .expect("start mysql 8.4.11")
-        })
-        .get_host_port_ipv4(3306)
-        .expect("get mysql port")
+        },
+        |container| container.get_host_port_ipv4(3306).expect("get mysql port"),
+    )
 }
 
 fn mysql_conn() -> MysqlConnection {

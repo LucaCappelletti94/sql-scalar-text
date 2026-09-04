@@ -1,4 +1,5 @@
-use std::sync::OnceLock;
+#[path = "support/exit_slot.rs"]
+mod exit_slot;
 
 use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
 use diesel::prelude::*;
@@ -13,23 +14,31 @@ use testcontainers::{
     runners::SyncRunner,
 };
 
-static PG: OnceLock<testcontainers::Container<GenericImage>> = OnceLock::new();
+/// One container per test binary, removed when the binary exits; a plain
+/// `static` would keep it running forever, see `exit_slot`.
+static PG: exit_slot::ExitSlot<testcontainers::Container<GenericImage>> =
+    exit_slot::ExitSlot::new();
 
 fn pg_port() -> u16 {
-    PG.get_or_init(|| {
-        GenericImage::new("postgres", "16.15-alpine")
-            .with_exposed_port(5432.tcp())
-            .with_wait_for(WaitFor::message_on_stderr(
-                "database system is ready to accept connections",
-            ))
-            .with_env_var("POSTGRES_PASSWORD", "postgres")
-            .with_env_var("POSTGRES_USER", "postgres")
-            .with_env_var("POSTGRES_DB", "postgres")
-            .start()
-            .expect("start postgres 16.15-alpine")
-    })
-    .get_host_port_ipv4(5432)
-    .expect("get postgres port")
+    PG.with(
+        || {
+            GenericImage::new("postgres", "16.15-alpine")
+                .with_exposed_port(5432.tcp())
+                .with_wait_for(WaitFor::message_on_stderr(
+                    "database system is ready to accept connections",
+                ))
+                .with_env_var("POSTGRES_PASSWORD", "postgres")
+                .with_env_var("POSTGRES_USER", "postgres")
+                .with_env_var("POSTGRES_DB", "postgres")
+                .start()
+                .expect("start postgres 16.15-alpine")
+        },
+        |container| {
+            container
+                .get_host_port_ipv4(5432)
+                .expect("get postgres port")
+        },
+    )
 }
 
 fn pg_conn() -> PgConnection {
