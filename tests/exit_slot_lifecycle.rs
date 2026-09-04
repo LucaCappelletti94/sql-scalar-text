@@ -42,25 +42,6 @@ fn probe_fills_slot_and_exits() {
 }
 
 #[test]
-fn a_panicking_drop_closure_neither_escapes_nor_skips_later_ones() {
-    static LATER_RAN: AtomicU32 = AtomicU32::new(0);
-    let drops: Vec<Box<dyn FnOnce() + Send>> = vec![
-        Box::new(|| panic!("a drop that misbehaves")),
-        Box::new(|| {
-            LATER_RAN.fetch_add(1, Ordering::Relaxed);
-        }),
-    ];
-    // The exit callback is an `extern "C"` boundary: a panic escaping it
-    // aborts the process. This must return normally.
-    exit_slot::run_drops(drops);
-    assert_eq!(
-        LATER_RAN.load(Ordering::Relaxed),
-        1,
-        "the closure after the panicking one did not run"
-    );
-}
-
-#[test]
 fn value_is_dropped_when_the_process_exits() {
     let dir = std::env::temp_dir().join(format!("exit-slot-{}", std::process::id()));
     fs::create_dir_all(&dir).expect("temp dir");

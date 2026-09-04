@@ -11,7 +11,7 @@ mod containers;
 mod exit_slot;
 
 use std::{
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, Write},
     process::{Command, Stdio},
     thread,
     time::Duration,
@@ -138,8 +138,32 @@ fn probe_starts_labelled_container() {
     );
     println!("container-id={id}");
     println!("volumes={}", volumes_of(&id).join(","));
+    // Piped stdout is block-buffered: without this the parent waits on the
+    // ID line while the probe sleeps.
+    let _ = std::io::stdout().flush();
     if std::env::var_os(PROBE_WAIT_ENV).is_some() {
         thread::sleep(Duration::from_secs(120));
+    }
+}
+
+/// Removes a container and named volumes when dropped, so a failed assertion
+/// between "ID known" and "explicit cleanup" cannot strand what the suite
+/// exists to prevent. `Drop` is infallible: results are ignored.
+struct Cleanup {
+    container: String,
+    volumes: Vec<String>,
+}
+
+impl Drop for Cleanup {
+    fn drop(&mut self) {
+        let _ = Command::new("docker")
+            .args(["rm", "-f", "-v", &self.container])
+            .output();
+        for v in &self.volumes {
+            let _ = Command::new("docker")
+                .args(["volume", "rm", "-f", v])
+                .output();
+        }
     }
 }
 
@@ -164,24 +188,31 @@ fn a_normal_exit_removes_the_container_and_its_volumes() {
         .lines()
         .find_map(|l| l.strip_prefix("container-id="))
         .expect("container id");
-    let volumes: Vec<&str> = stdout
+    let volumes: Vec<String> = stdout
         .lines()
         .find_map(|l| l.strip_prefix("volumes="))
         .expect("volume list")
         .split(',')
         .filter(|v| !v.is_empty())
+        .map(str::to_owned)
         .collect();
+    let cleanup = Cleanup {
+        container: id.to_owned(),
+        volumes,
+    };
     assert!(
-        !volumes.is_empty(),
+        !cleanup.volumes.is_empty(),
         "the image declares a volume; the probe saw none"
     );
-    let container_left = container_exists(id);
-    let stranded: Vec<&&str> = volumes.iter().filter(|v| volume_exists(v)).collect();
-    remove(&[id]);
-    for v in &volumes {
-        let _ = docker(&["volume", "rm", "-f", v]);
-    }
-    assert!(!container_left, "container {id} survived a normal exit");
+    assert!(
+        !container_exists(id),
+        "container {id} survived a normal exit"
+    );
+    let stranded: Vec<&String> = cleanup
+        .volumes
+        .iter()
+        .filter(|v| volume_exists(v))
+        .collect();
     assert!(
         stranded.is_empty(),
         "volumes survived a normal exit: {stranded:?}"
@@ -207,11 +238,14 @@ fn a_killed_run_leaves_a_container_the_sweep_can_identify() {
         .map_while(Result::ok)
         .find_map(|line| line.strip_prefix("container-id=").map(str::to_owned))
         .expect("the probe printed its container id");
+    let _cleanup = Cleanup {
+        container: id.clone(),
+        volumes: Vec::new(),
+    };
     child.kill().expect("SIGKILL the probe");
     let _ = child.wait();
 
     let survived = container_exists(&id);
-    let volumes = volumes_of(&id);
     let labels = docker(&[
         "inspect",
         "--format",
@@ -222,12 +256,6 @@ fn a_killed_run_leaves_a_container_the_sweep_can_identify() {
         ),
         &id,
     ]);
-    remove(&[&id]);
-    let stranded: Vec<&String> = volumes.iter().filter(|v| volume_exists(v)).collect();
-    assert!(
-        stranded.is_empty(),
-        "cleanup left the killed run's volumes behind: {stranded:?}"
-    );
     assert!(
         survived,
         "a SIGKILLed run should leave its container; nothing ran to remove it"

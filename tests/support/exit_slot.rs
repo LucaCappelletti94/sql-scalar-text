@@ -67,7 +67,7 @@ fn drain(registry: &Drops) {
 /// Run each drop in order, containing a panic so the rest still run. A
 /// `Drop` that panics is a defect in the value's type; the exit path
 /// survives it rather than compounding it into an abort.
-pub fn run_drops(drops: Vec<Box<dyn FnOnce() + Send>>) {
+fn run_drops(drops: Vec<Box<dyn FnOnce() + Send>>) {
     for drop_slot in drops {
         if catch_unwind(AssertUnwindSafe(drop_slot)).is_err() {
             // Not `eprintln!`: it panics when stderr is closed, and nothing
@@ -127,6 +127,24 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::*;
+
+    #[test]
+    fn a_panicking_drop_closure_neither_escapes_nor_skips_later_ones() {
+        static LATER_RAN: AtomicBool = AtomicBool::new(false);
+        let drops: Vec<Box<dyn FnOnce() + Send>> = vec![
+            Box::new(|| panic!("a drop that misbehaves")),
+            Box::new(|| {
+                LATER_RAN.store(true, Ordering::Relaxed);
+            }),
+        ];
+        // The exit callback is an `extern "C"` boundary: a panic escaping it
+        // aborts the process. This must return normally.
+        run_drops(drops);
+        assert!(
+            LATER_RAN.load(Ordering::Relaxed),
+            "the closure after the panicking one did not run"
+        );
+    }
 
     #[test]
     fn a_drop_registered_during_the_drain_runs_and_does_not_deadlock() {
