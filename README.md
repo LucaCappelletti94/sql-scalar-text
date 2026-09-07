@@ -4,6 +4,7 @@
 [![docs.rs](https://img.shields.io/docsrs/sql-scalar-text)](https://docs.rs/sql-scalar-text)
 [![CI](https://github.com/LucaCappelletti94/sql-scalar-text/actions/workflows/ci.yml/badge.svg)](https://github.com/LucaCappelletti94/sql-scalar-text/actions/workflows/ci.yml)
 [![MSRV](https://img.shields.io/badge/MSRV-1.88-blue.svg)](https://github.com/LucaCappelletti94/sql-scalar-text)
+[![Codacy](https://app.codacy.com/project/badge/Grade/f2cfcd58215e44e696bb8b80c30abd25)](https://app.codacy.com/gh/LucaCappelletti94/sql-scalar-text/dashboard)
 [![license](https://img.shields.io/crates/l/sql-scalar-text.svg)](https://github.com/LucaCappelletti94/sql-scalar-text/blob/main/LICENSE)
 
 `sql-scalar-text` parses the text forms that PostgreSQL, MySQL, and SQLite emit for scalar values. Its shared acceptance set lets every wire-text consumer decode the same spelling to the same Rust value.
