@@ -126,6 +126,29 @@ fn sqlite_date_iso_text() {
 }
 
 #[test]
+fn sqlite_year_zero_and_before() {
+    let mut conn = mem_conn();
+
+    let text = sqlite_text(&mut conn, "date('0000-02-29')");
+    assert_eq!(
+        parse_date(&text),
+        NaiveDate::from_ymd_opt(0, 2, 29),
+        "{text:?}"
+    );
+
+    let text = sqlite_text(&mut conn, "datetime('0000-01-01 12:00:00')");
+    let expected = NaiveDate::from_ymd_opt(0, 1, 1)
+        .unwrap()
+        .and_hms_opt(12, 0, 0);
+    assert_eq!(parse_timestamp(&text), expected, "{text:?}");
+
+    // PostgreSQL and MySQL both reject a signed year on input.
+    let text = sqlite_text(&mut conn, "date('0000-01-01', '-1 day')");
+    assert_eq!(text, "-0001-12-31");
+    assert_eq!(parse_date(&text), None);
+}
+
+#[test]
 fn sqlite_time_iso_text() {
     let mut conn = mem_conn();
 

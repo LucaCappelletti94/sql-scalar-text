@@ -96,6 +96,22 @@ fn mysql_timestamp_fractional_precision_matrix() {
 }
 
 #[test]
+fn mysql_year_zero() {
+    let mut conn = mysql_conn();
+    let year_zero = NaiveDate::from_ymd_opt(0, 1, 1).unwrap();
+
+    let text = mysql_text(&mut conn, "CAST(CAST('0000-01-01' AS DATE) AS CHAR)");
+    assert_eq!(parse_date(&text), Some(year_zero), "{text:?}");
+
+    let text = mysql_text(
+        &mut conn,
+        "CAST(CAST('0000-01-01 12:00:00' AS DATETIME) AS CHAR)",
+    );
+    let expected = year_zero.and_hms_opt(12, 0, 0).unwrap();
+    assert_eq!(parse_timestamp(&text), Some(expected), "{text:?}");
+}
+
+#[test]
 fn mysql_date_and_time_cast_as_char() {
     let mut conn = mysql_conn();
 

@@ -1,19 +1,38 @@
 #![no_main]
 
-use core::fmt::Write as FmtWrite;
 use libfuzzer_sys::fuzz_target;
 use sql_scalar_text::parse_pg_bytea_hex;
 
+/// Decode through `u8::from_str_radix`, independently of the crate's nibble table.
+fn reference(text: &str) -> Option<Vec<u8>> {
+    let hex = text.strip_prefix(r"\x")?;
+    if !hex.len().is_multiple_of(2) || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).ok())
+        .collect()
+}
+
 fuzz_target!(|data: &[u8]| {
-    if let Ok(text) = core::str::from_utf8(data) {
-        if let Some(parsed) = parse_pg_bytea_hex(text) {
-            let mut canonical = String::with_capacity(2 + parsed.len() * 2);
-            canonical.push_str(r"\x");
-            for byte in &parsed {
-                let _ = write!(canonical, "{:02x}", byte);
-            }
-            let reparsed = parse_pg_bytea_hex(&canonical).expect("canonical form must reparse");
-            assert_eq!(reparsed, parsed);
-        }
+    let Ok(text) = core::str::from_utf8(data) else {
+        return;
+    };
+    let parsed = parse_pg_bytea_hex(text);
+    assert_eq!(parsed, reference(text), "{text:?}");
+    let Some(bytes) = parsed else {
+        return;
+    };
+    let lower: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    for spelling in [
+        format!(r"\x{lower}"),
+        format!(r"\x{}", lower.to_uppercase()),
+    ] {
+        assert_eq!(
+            parse_pg_bytea_hex(&spelling).as_ref(),
+            Some(&bytes),
+            "{text:?} as {spelling:?}"
+        );
     }
 });

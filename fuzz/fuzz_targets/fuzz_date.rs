@@ -1,18 +1,24 @@
 #![no_main]
 
-#[path = "pg_year.rs"]
-mod pg_year;
+#[path = "date_spellings.rs"]
+mod date_spellings;
 
 use libfuzzer_sys::fuzz_target;
 use sql_scalar_text::parse_date;
 
 fuzz_target!(|data: &[u8]| {
-    if let Ok(text) = core::str::from_utf8(data) {
-        if let Some(parsed) = parse_date(text) {
-            let (year, era) = pg_year::pg_year(&parsed);
-            let canonical = format!("{year:04}-{}{era}", parsed.format("%m-%d"));
-            let reparsed = parse_date(&canonical).expect("canonical form must reparse");
-            assert_eq!(reparsed, parsed);
-        }
+    let Ok(text) = core::str::from_utf8(data) else {
+        return;
+    };
+    let Some(parsed) = parse_date(text) else {
+        return;
+    };
+    for (body, era) in date_spellings::date_spellings(parsed) {
+        let spelling = format!("{body}{era}");
+        assert_eq!(
+            parse_date(&spelling),
+            Some(parsed),
+            "{text:?} as {spelling:?}"
+        );
     }
 });
