@@ -1,4 +1,4 @@
-use chrono::{FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
+use chrono::{Datelike, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
 use core::fmt::Write as _;
 use proptest::prelude::*;
 use sql_scalar_text::{
@@ -10,6 +10,21 @@ fn date_strategy() -> impl Strategy<Value = NaiveDate> {
     (1970i32..=2100, 1u32..=366u32).prop_filter_map("valid calendar date", |(year, doy)| {
         NaiveDate::from_yo_opt(year, doy)
     })
+}
+
+fn full_range_date_strategy() -> impl Strategy<Value = NaiveDate> {
+    (NaiveDate::MIN.num_days_from_ce()..=NaiveDate::MAX.num_days_from_ce())
+        .prop_map(|days| NaiveDate::from_num_days_from_ce_opt(days).unwrap())
+}
+
+/// PostgreSQL's date spelling and its era suffix, which trails the whole value.
+fn pg_date(d: NaiveDate) -> (String, &'static str) {
+    let (year, era) = if d.year() >= 1 {
+        (d.year(), "")
+    } else {
+        (1 - d.year(), " BC")
+    };
+    (format!("{year:04}-{}", d.format("%m-%d")), era)
 }
 
 fn time_strategy() -> impl Strategy<Value = NaiveTime> {
@@ -146,6 +161,37 @@ proptest! {
         let got = parse_time(&text)
             .unwrap_or_else(|| panic!("parse_time: {text:?}"));
         prop_assert_eq!(got, t);
+    }
+
+    #[test]
+    fn date_pg_full_range_roundtrip(d in full_range_date_strategy()) {
+        let (date, era) = pg_date(d);
+        let text = format!("{date}{era}");
+        prop_assert_eq!(parse_date(&text), Some(d), "{}", text);
+    }
+
+    #[test]
+    fn timestamp_pg_full_range_roundtrip(d in full_range_date_strategy(), t in time_strategy()) {
+        let (date, era) = pg_date(d);
+        let time = strip_frac_zeros(&t.format("%H:%M:%S%.6f").to_string());
+        let text = format!("{date} {time}{era}");
+        prop_assert_eq!(parse_timestamp(&text), Some(d.and_time(t)), "{}", text);
+    }
+
+    #[test]
+    fn timestamp_tz_pg_full_range_roundtrip(
+        d in full_range_date_strategy(),
+        t in time_strategy(),
+        offset in second_offset_secs_strategy(),
+    ) {
+        let local = d.and_time(t);
+        let utc = FixedOffset::east_opt(offset).unwrap().from_local_datetime(&local).single();
+        prop_assume!(utc.is_some());
+        let (date, era) = pg_date(d);
+        let time = strip_frac_zeros(&t.format("%H:%M:%S%.6f").to_string());
+        let (sign, h, m, s) = offset_parts(offset);
+        let text = format!("{date} {time}{sign}{h:02}:{m:02}:{s:02}{era}");
+        prop_assert_eq!(parse_timestamp_tz(&text), utc.map(|dt| dt.with_timezone(&Utc)), "{}", text);
     }
 }
 
