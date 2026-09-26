@@ -5,10 +5,12 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 use chrono::{
-    DateTime, FixedOffset, LocalResult, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc,
+    DateTime, FixedOffset, LocalResult, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Timelike,
+    Utc,
 };
 
-/// Parse a timestamp with a space or `T` separator and optional fractional seconds.
+/// Parse a timestamp with a space or `T` separator and optional fractional seconds, refusing a
+/// seconds field of `60`.
 ///
 /// ```
 /// let dt = sql_scalar_text::parse_timestamp("2024-01-02 03:04:05.125").unwrap();
@@ -20,9 +22,11 @@ pub fn parse_timestamp(text: &str) -> Option<NaiveDateTime> {
         .or_else(|_| NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S"))
         .or_else(|_| NaiveDateTime::parse_from_str(text, "%Y-%m-%dT%H:%M:%S"))
         .ok()
+        .filter(|dt| !is_leap_second(dt))
 }
 
-/// Parse an RFC 3339 or PostgreSQL timestamp with an explicit offset.
+/// Parse an RFC 3339 timestamp, or a PostgreSQL one whose offset is `Z`, `±HH`, `±HHMM`,
+/// `±HH:MM` or `±HH:MM:SS`, refusing a seconds field of `60`.
 ///
 /// ```
 /// let dt = sql_scalar_text::parse_timestamp_tz("2024-01-02T03:04:05+02:00").unwrap();
@@ -30,7 +34,7 @@ pub fn parse_timestamp(text: &str) -> Option<NaiveDateTime> {
 /// ```
 pub fn parse_timestamp_tz(text: &str) -> Option<DateTime<Utc>> {
     if let Ok(dt) = DateTime::parse_from_rfc3339(text) {
-        return Some(dt.with_timezone(&Utc));
+        return (!is_leap_second(&dt)).then(|| dt.with_timezone(&Utc));
     }
 
     let bytes = text.as_bytes();
@@ -38,7 +42,7 @@ pub fn parse_timestamp_tz(text: &str) -> Option<DateTime<Utc>> {
         return None;
     }
 
-    for len in [1, 3, 5, 6] {
+    for len in [1, 3, 5, 6, 9] {
         if bytes.len() >= len {
             let offset_start = bytes.len() - len;
             if let Some(offset) = parse_pg_offset(&bytes[offset_start..]) {
@@ -63,7 +67,7 @@ pub fn parse_date(text: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(text, "%Y-%m-%d").ok()
 }
 
-/// Parse a time with optional fractional seconds.
+/// Parse a time with optional fractional seconds, refusing a seconds field of `60`.
 ///
 /// ```
 /// let t = sql_scalar_text::parse_time("03:04:05.125").unwrap();
@@ -73,6 +77,12 @@ pub fn parse_time(text: &str) -> Option<NaiveTime> {
     NaiveTime::parse_from_str(text, "%H:%M:%S%.f")
         .or_else(|_| NaiveTime::parse_from_str(text, "%H:%M:%S"))
         .ok()
+        .filter(|t| !is_leap_second(t))
+}
+
+/// chrono stores a `:60` seconds field as a nanosecond count of a second or more.
+fn is_leap_second(t: &impl Timelike) -> bool {
+    t.nanosecond() >= 1_000_000_000
 }
 
 /// Parse `t`, `f`, `1`, or `0` as a boolean.
@@ -165,46 +175,28 @@ fn parse_two_digits(bytes: &[u8]) -> Option<i32> {
 }
 
 fn parse_pg_offset(bytes: &[u8]) -> Option<FixedOffset> {
-    match bytes.len() {
-        1 if bytes[0] == b'Z' => FixedOffset::east_opt(0),
-        3 => {
-            let sign = match bytes[0] {
-                b'+' => 1,
-                b'-' => -1,
-                _ => return None,
-            };
-            let h = parse_two_digits(&bytes[1..])?;
-            if h > 23 {
-                return None;
-            }
-            FixedOffset::east_opt(sign * h * 3600)
-        }
-        5 => {
-            let sign = match bytes[0] {
-                b'+' => 1,
-                b'-' => -1,
-                _ => return None,
-            };
-            let h = parse_two_digits(&bytes[1..])?;
-            let m = parse_two_digits(&bytes[3..])?;
-            if h > 23 || m > 59 {
-                return None;
-            }
-            FixedOffset::east_opt(sign * (h * 3600 + m * 60))
-        }
-        6 if bytes[3] == b':' => {
-            let sign = match bytes[0] {
-                b'+' => 1,
-                b'-' => -1,
-                _ => return None,
-            };
-            let h = parse_two_digits(&bytes[1..3])?;
-            let m = parse_two_digits(&bytes[4..6])?;
-            if h > 23 || m > 59 {
-                return None;
-            }
-            FixedOffset::east_opt(sign * (h * 3600 + m * 60))
-        }
-        _ => None,
+    if bytes == b"Z" {
+        return FixedOffset::east_opt(0);
     }
+    let (&sign, digits) = bytes.split_first()?;
+    let sign = match sign {
+        b'+' => 1,
+        b'-' => -1,
+        _ => return None,
+    };
+    let h = parse_two_digits(digits)?;
+    let (m, s) = match digits.len() {
+        2 => (0, 0),
+        4 => (parse_two_digits(&digits[2..])?, 0),
+        5 if digits[2] == b':' => (parse_two_digits(&digits[3..])?, 0),
+        8 if digits[2] == b':' && digits[5] == b':' => (
+            parse_two_digits(&digits[3..])?,
+            parse_two_digits(&digits[6..])?,
+        ),
+        _ => return None,
+    };
+    if h > 23 || m > 59 || s > 59 {
+        return None;
+    }
+    FixedOffset::east_opt(sign * (h * 3600 + m * 60 + s))
 }

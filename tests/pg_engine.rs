@@ -120,6 +120,29 @@ fn pg_timestamptz_offset_forms() {
 }
 
 #[test]
+fn pg_timestamptz_local_mean_time_offsets() {
+    let mut conn = pg_conn();
+
+    // Before a zone adopted standard time PostgreSQL prints its local mean
+    // time, whose offset carries seconds.
+    let cases: &[(&str, &str, &str)] = &[
+        ("Europe/Brussels", "1850-01-01T00:00:00Z", "+00:17:30"),
+        ("Europe/Dublin", "1870-01-01T00:00:00.544453Z", "-00:25:21"),
+        ("America/New_York", "1850-01-01T00:00:00Z", "-04:56:02"),
+    ];
+
+    for &(zone, instant, offset) in cases {
+        set_timezone(&mut conn, zone);
+        let text = pg_text(&mut conn, &format!("'{instant}'::timestamptz::text"));
+        assert!(text.ends_with(offset), "zone={zone} text={text:?}");
+        let expected: DateTime<Utc> = instant.parse().unwrap();
+        let got = parse_timestamp_tz(&text)
+            .unwrap_or_else(|| panic!("parse_timestamp_tz: {text:?} (zone={zone})"));
+        assert_eq!(got, expected, "zone={zone} text={text:?}");
+    }
+}
+
+#[test]
 fn pg_scalar_types() {
     let mut conn = pg_conn();
 
