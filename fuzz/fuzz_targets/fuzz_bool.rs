@@ -4,11 +4,19 @@ use libfuzzer_sys::fuzz_target;
 use sql_scalar_text::parse_bool;
 
 fuzz_target!(|data: &[u8]| {
-    if let Ok(text) = core::str::from_utf8(data) {
-        if let Some(parsed) = parse_bool(text) {
-            let canonical = if parsed { "t" } else { "f" };
-            let reparsed = parse_bool(canonical).expect("canonical form must reparse");
-            assert_eq!(reparsed, parsed);
-        }
+    let Ok(text) = core::str::from_utf8(data) else {
+        return;
+    };
+    let Some(parsed) = parse_bool(text) else {
+        return;
+    };
+    let spellings = if parsed { ["t", "1"] } else { ["f", "0"] };
+    assert!(spellings.contains(&text), "{text:?} parsed as {parsed}");
+    for spelling in spellings {
+        assert_eq!(
+            parse_bool(spelling),
+            Some(parsed),
+            "{text:?} as {spelling:?}"
+        );
     }
 });

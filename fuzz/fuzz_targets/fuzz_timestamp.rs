@@ -1,18 +1,44 @@
 #![no_main]
 
-#[path = "pg_year.rs"]
-mod pg_year;
+#[path = "date_spellings.rs"]
+mod date_spellings;
+#[path = "time_spellings.rs"]
+mod time_spellings;
 
 use libfuzzer_sys::fuzz_target;
-use sql_scalar_text::parse_timestamp;
+use sql_scalar_text::{parse_date, parse_time, parse_timestamp};
 
 fuzz_target!(|data: &[u8]| {
-    if let Ok(text) = core::str::from_utf8(data) {
-        if let Some(parsed) = parse_timestamp(text) {
-            let (year, era) = pg_year::pg_year(&parsed);
-            let canonical = format!("{year:04}-{}{era}", parsed.format("%m-%d %H:%M:%S%.9f"));
-            let reparsed = parse_timestamp(&canonical).expect("canonical form must reparse");
-            assert_eq!(reparsed, parsed);
+    let Ok(text) = core::str::from_utf8(data) else {
+        return;
+    };
+    let Some(parsed) = parse_timestamp(text) else {
+        return;
+    };
+    let times = time_spellings::time_spellings(parsed.time());
+    for time in &times {
+        assert_eq!(
+            parse_time(time),
+            Some(parsed.time()),
+            "{text:?} time {time:?}"
+        );
+    }
+    for (date, era) in date_spellings::date_spellings(parsed.date()) {
+        let whole_date = format!("{date}{era}");
+        assert_eq!(
+            parse_date(&whole_date),
+            Some(parsed.date()),
+            "{text:?} date {whole_date:?}"
+        );
+        for separator in [' ', 'T'] {
+            for time in &times {
+                let spelling = format!("{date}{separator}{time}{era}");
+                assert_eq!(
+                    parse_timestamp(&spelling),
+                    Some(parsed),
+                    "{text:?} as {spelling:?}"
+                );
+            }
         }
     }
 });

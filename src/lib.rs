@@ -75,7 +75,8 @@ fn split_era(bytes: &[u8]) -> (&[u8], bool) {
     }
 }
 
-/// Parse a leading `Y{4,}-MM-DD`, where year `Y` BC is chrono's year `1 - Y`.
+/// Parse a leading `Y{4,}-MM-DD`, where year `Y` BC is chrono's year `1 - Y` and year `0000`, as
+/// MySQL and SQLite print it, is chrono's year 0.
 fn parse_date_prefix(bytes: &[u8], bc: bool) -> Option<(NaiveDate, &[u8])> {
     let year_len = bytes.iter().take_while(|b| b.is_ascii_digit()).count();
     if year_len < 4 || (year_len > 4 && bytes[0] == b'0') {
@@ -85,10 +86,11 @@ fn parse_date_prefix(bytes: &[u8], bc: bool) -> Option<(NaiveDate, &[u8])> {
     let year = year_digits.iter().try_fold(0i32, |year, &digit| {
         year.checked_mul(10)?.checked_add(i32::from(digit - b'0'))
     })?;
-    if year == 0 {
-        return None;
-    }
-    let year = if bc { 1 - year } else { year };
+    let year = match (year, bc) {
+        (0, true) => return None,
+        (_, true) => 1 - year,
+        (_, false) => year,
+    };
     let Some((&[b'-', m1, m2, b'-', d1, d2], rest)) = rest.split_first_chunk() else {
         return None;
     };
