@@ -4,75 +4,138 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use chrono::{
-    DateTime, FixedOffset, LocalResult, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc,
-};
+use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
 
-/// Parse a timestamp with a space or `T` separator and optional fractional seconds.
+/// Parse `YYYY-MM-DD HH:MM:SS[.f]` with a space or `T` separator, a year of four or more digits
+/// and PostgreSQL's trailing ` BC`.
 ///
 /// ```
 /// let dt = sql_scalar_text::parse_timestamp("2024-01-02 03:04:05.125").unwrap();
 /// assert_eq!(dt.format("%Y-%m-%d %H:%M:%S%.f").to_string(), "2024-01-02 03:04:05.125");
 /// ```
 pub fn parse_timestamp(text: &str) -> Option<NaiveDateTime> {
-    NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S%.f")
-        .or_else(|_| NaiveDateTime::parse_from_str(text, "%Y-%m-%dT%H:%M:%S%.f"))
-        .or_else(|_| NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S"))
-        .or_else(|_| NaiveDateTime::parse_from_str(text, "%Y-%m-%dT%H:%M:%S"))
-        .ok()
+    let (body, bc) = split_era(text.as_bytes());
+    match parse_datetime_prefix(body, bc)? {
+        (dt, []) => Some(dt),
+        _ => None,
+    }
 }
 
-/// Parse an RFC 3339 or PostgreSQL timestamp with an explicit offset.
+/// Parse a [`parse_timestamp`] layout followed by a `Z`, `±HH`, `±HHMM`, `±HH:MM` or `±HH:MM:SS`
+/// offset, then PostgreSQL's optional ` BC`.
 ///
 /// ```
 /// let dt = sql_scalar_text::parse_timestamp_tz("2024-01-02T03:04:05+02:00").unwrap();
 /// assert_eq!(dt.to_rfc3339(), "2024-01-02T01:04:05+00:00");
 /// ```
 pub fn parse_timestamp_tz(text: &str) -> Option<DateTime<Utc>> {
-    if let Ok(dt) = DateTime::parse_from_rfc3339(text) {
-        return Some(dt.with_timezone(&Utc));
-    }
-
-    let bytes = text.as_bytes();
-    if bytes.len() < 11 || bytes[10] != b' ' {
-        return None;
-    }
-
-    for len in [1, 3, 5, 6] {
-        if bytes.len() >= len {
-            let offset_start = bytes.len() - len;
-            if let Some(offset) = parse_pg_offset(&bytes[offset_start..]) {
-                let naive_dt = parse_timestamp(&text[..offset_start])?;
-                if let LocalResult::Single(dt) = offset.from_local_datetime(&naive_dt) {
-                    return Some(dt.with_timezone(&Utc));
-                }
-            }
-        }
-    }
-
-    None
+    let (body, bc) = split_era(text.as_bytes());
+    let (local, offset) = parse_datetime_prefix(body, bc)?;
+    let offset = parse_pg_offset(offset)?;
+    Some(
+        offset
+            .from_local_datetime(&local)
+            .single()?
+            .with_timezone(&Utc),
+    )
 }
 
-/// Parse a `YYYY-MM-DD` date.
+/// Parse a `YYYY-MM-DD` date with a year of four or more digits and PostgreSQL's trailing ` BC`.
 ///
 /// ```
 /// let d = sql_scalar_text::parse_date("2024-01-02").unwrap();
 /// assert_eq!(d.to_string(), "2024-01-02");
 /// ```
 pub fn parse_date(text: &str) -> Option<NaiveDate> {
-    NaiveDate::parse_from_str(text, "%Y-%m-%d").ok()
+    let (body, bc) = split_era(text.as_bytes());
+    match parse_date_prefix(body, bc)? {
+        (date, []) => Some(date),
+        _ => None,
+    }
 }
 
-/// Parse a time with optional fractional seconds.
+/// Parse `HH:MM:SS[.f]` with one to nine fraction digits.
 ///
 /// ```
 /// let t = sql_scalar_text::parse_time("03:04:05.125").unwrap();
 /// assert_eq!(t.to_string(), "03:04:05.125");
 /// ```
 pub fn parse_time(text: &str) -> Option<NaiveTime> {
-    NaiveTime::parse_from_str(text, "%H:%M:%S%.f")
-        .or_else(|_| NaiveTime::parse_from_str(text, "%H:%M:%S"))
-        .ok()
+    match parse_time_prefix(text.as_bytes())? {
+        (time, []) => Some(time),
+        _ => None,
+    }
+}
+
+/// Split off PostgreSQL's ` BC`, which trails the whole value.
+fn split_era(bytes: &[u8]) -> (&[u8], bool) {
+    match bytes.strip_suffix(b" BC") {
+        Some(body) => (body, true),
+        None => (bytes, false),
+    }
+}
+
+/// Parse a leading `Y{4,}-MM-DD`, where year `Y` BC is chrono's year `1 - Y`.
+fn parse_date_prefix(bytes: &[u8], bc: bool) -> Option<(NaiveDate, &[u8])> {
+    let year_len = bytes.iter().take_while(|b| b.is_ascii_digit()).count();
+    if year_len < 4 || (year_len > 4 && bytes[0] == b'0') {
+        return None;
+    }
+    let (year_digits, rest) = bytes.split_at(year_len);
+    let year = year_digits.iter().try_fold(0i32, |year, &digit| {
+        year.checked_mul(10)?.checked_add(i32::from(digit - b'0'))
+    })?;
+    if year == 0 {
+        return None;
+    }
+    let year = if bc { 1 - year } else { year };
+    let Some((&[b'-', m1, m2, b'-', d1, d2], rest)) = rest.split_first_chunk() else {
+        return None;
+    };
+    let month = parse_two_digits(&[m1, m2])?;
+    let day = parse_two_digits(&[d1, d2])?;
+    Some((
+        NaiveDate::from_ymd_opt(year, month.into(), day.into())?,
+        rest,
+    ))
+}
+
+/// Parse a leading `HH:MM:SS[.f]` with one to nine fraction digits.
+fn parse_time_prefix(bytes: &[u8]) -> Option<(NaiveTime, &[u8])> {
+    let Some((&[h1, h2, b':', m1, m2, b':', s1, s2], rest)) = bytes.split_first_chunk() else {
+        return None;
+    };
+    let (nanos, rest) = match rest.split_first() {
+        Some((b'.', fraction)) => {
+            let len = fraction.iter().take_while(|b| b.is_ascii_digit()).count();
+            if !(1..=9).contains(&len) {
+                return None;
+            }
+            let (digits, rest) = fraction.split_at(len);
+            let value = digits
+                .iter()
+                .fold(0u32, |value, &digit| value * 10 + u32::from(digit - b'0'));
+            ((len..9).fold(value, |nanos, _| nanos * 10), rest)
+        }
+        _ => (0, rest),
+    };
+    let time = NaiveTime::from_hms_nano_opt(
+        parse_two_digits(&[h1, h2])?.into(),
+        parse_two_digits(&[m1, m2])?.into(),
+        parse_two_digits(&[s1, s2])?.into(),
+        nanos,
+    )?;
+    Some((time, rest))
+}
+
+/// Parse a leading date and time joined by a space or `T`.
+fn parse_datetime_prefix(bytes: &[u8], bc: bool) -> Option<(NaiveDateTime, &[u8])> {
+    let (date, rest) = parse_date_prefix(bytes, bc)?;
+    let (&(b' ' | b'T'), rest) = rest.split_first()? else {
+        return None;
+    };
+    let (time, rest) = parse_time_prefix(rest)?;
+    Some((date.and_time(time), rest))
 }
 
 /// Parse `t`, `f`, `1`, or `0` as a boolean.
@@ -157,54 +220,36 @@ fn hex_digit(byte: u8) -> Option<u8> {
     }
 }
 
-fn parse_two_digits(bytes: &[u8]) -> Option<i32> {
-    if bytes.len() < 2 || !bytes[0].is_ascii_digit() || !bytes[1].is_ascii_digit() {
-        return None;
+fn parse_two_digits(bytes: &[u8]) -> Option<u8> {
+    match *bytes {
+        [tens @ b'0'..=b'9', ones @ b'0'..=b'9', ..] => Some((tens - b'0') * 10 + (ones - b'0')),
+        _ => None,
     }
-    Some(i32::from(bytes[0] - b'0') * 10 + i32::from(bytes[1] - b'0'))
 }
 
 fn parse_pg_offset(bytes: &[u8]) -> Option<FixedOffset> {
-    match bytes.len() {
-        1 if bytes[0] == b'Z' => FixedOffset::east_opt(0),
-        3 => {
-            let sign = match bytes[0] {
-                b'+' => 1,
-                b'-' => -1,
-                _ => return None,
-            };
-            let h = parse_two_digits(&bytes[1..])?;
-            if h > 23 {
-                return None;
-            }
-            FixedOffset::east_opt(sign * h * 3600)
-        }
-        5 => {
-            let sign = match bytes[0] {
-                b'+' => 1,
-                b'-' => -1,
-                _ => return None,
-            };
-            let h = parse_two_digits(&bytes[1..])?;
-            let m = parse_two_digits(&bytes[3..])?;
-            if h > 23 || m > 59 {
-                return None;
-            }
-            FixedOffset::east_opt(sign * (h * 3600 + m * 60))
-        }
-        6 if bytes[3] == b':' => {
-            let sign = match bytes[0] {
-                b'+' => 1,
-                b'-' => -1,
-                _ => return None,
-            };
-            let h = parse_two_digits(&bytes[1..3])?;
-            let m = parse_two_digits(&bytes[4..6])?;
-            if h > 23 || m > 59 {
-                return None;
-            }
-            FixedOffset::east_opt(sign * (h * 3600 + m * 60))
-        }
-        _ => None,
+    if bytes == b"Z" {
+        return FixedOffset::east_opt(0);
     }
+    let (&sign, digits) = bytes.split_first()?;
+    let sign = match sign {
+        b'+' => 1,
+        b'-' => -1,
+        _ => return None,
+    };
+    let h = parse_two_digits(digits)?;
+    let (m, s) = match digits.len() {
+        2 => (0, 0),
+        4 => (parse_two_digits(&digits[2..])?, 0),
+        5 if digits[2] == b':' => (parse_two_digits(&digits[3..])?, 0),
+        8 if digits[2] == b':' && digits[5] == b':' => (
+            parse_two_digits(&digits[3..])?,
+            parse_two_digits(&digits[6..])?,
+        ),
+        _ => return None,
+    };
+    if h > 23 || m > 59 || s > 59 {
+        return None;
+    }
+    FixedOffset::east_opt(sign * (i32::from(h) * 3600 + i32::from(m) * 60 + i32::from(s)))
 }

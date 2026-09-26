@@ -1,4 +1,4 @@
-use chrono::{FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
+use chrono::{Datelike, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
 use core::fmt::Write as _;
 use proptest::prelude::*;
 use sql_scalar_text::{
@@ -12,6 +12,21 @@ fn date_strategy() -> impl Strategy<Value = NaiveDate> {
     })
 }
 
+fn full_range_date_strategy() -> impl Strategy<Value = NaiveDate> {
+    (NaiveDate::MIN.num_days_from_ce()..=NaiveDate::MAX.num_days_from_ce())
+        .prop_map(|days| NaiveDate::from_num_days_from_ce_opt(days).unwrap())
+}
+
+/// PostgreSQL's date spelling and its era suffix, which trails the whole value.
+fn pg_date(d: NaiveDate) -> (String, &'static str) {
+    let (year, era) = if d.year() >= 1 {
+        (d.year(), "")
+    } else {
+        (1 - d.year(), " BC")
+    };
+    (format!("{year:04}-{}", d.format("%m-%d")), era)
+}
+
 fn time_strategy() -> impl Strategy<Value = NaiveTime> {
     (0u32..24, 0u32..60, 0u32..60, 0u32..1_000_000)
         .prop_map(|(h, m, s, us)| NaiveTime::from_hms_micro_opt(h, m, s, us).unwrap())
@@ -23,6 +38,10 @@ fn datetime_strategy() -> impl Strategy<Value = NaiveDateTime> {
 
 fn offset_secs_strategy() -> impl Strategy<Value = i32> {
     (-1439i32..=1439).prop_map(|m| m * 60)
+}
+
+fn second_offset_secs_strategy() -> impl Strategy<Value = i32> {
+    -86_399i32..=86_399
 }
 
 fn whole_hour_offset_secs_strategy() -> impl Strategy<Value = i32> {
@@ -48,12 +67,13 @@ fn fmt_local(utc: chrono::DateTime<Utc>, offset: i32) -> String {
     strip_frac_zeros(&local.format("%Y-%m-%d %H:%M:%S%.6f").to_string())
 }
 
-fn offset_parts(offset: i32) -> (char, u32, u32) {
+fn offset_parts(offset: i32) -> (char, u32, u32, u32) {
     let sign = if offset >= 0 { '+' } else { '-' };
     let abs = offset.unsigned_abs();
     let h = abs / 3600;
     let m = (abs % 3600) / 60;
-    (sign, h, m)
+    let s = abs % 60;
+    (sign, h, m, s)
 }
 
 proptest! {
@@ -87,7 +107,7 @@ proptest! {
     fn timestamp_tz_plus_hh_roundtrip(dt in datetime_strategy(), offset in whole_hour_offset_secs_strategy()) {
         let utc = Utc.from_utc_datetime(&dt);
         let local = fmt_local(utc, offset);
-        let (sign, h, _m) = offset_parts(offset);
+        let (sign, h, _m, _s) = offset_parts(offset);
         let text = format!("{local}{sign}{h:02}");
         let got = parse_timestamp_tz(&text)
             .unwrap_or_else(|| panic!("parse_timestamp_tz +hh: {text:?}"));
@@ -98,7 +118,7 @@ proptest! {
     fn timestamp_tz_plus_hhmm_roundtrip(dt in datetime_strategy(), offset in offset_secs_strategy()) {
         let utc = Utc.from_utc_datetime(&dt);
         let local = fmt_local(utc, offset);
-        let (sign, h, m) = offset_parts(offset);
+        let (sign, h, m, _s) = offset_parts(offset);
         let text = format!("{local}{sign}{h:02}{m:02}");
         let got = parse_timestamp_tz(&text)
             .unwrap_or_else(|| panic!("parse_timestamp_tz +hhmm: {text:?}"));
@@ -109,10 +129,21 @@ proptest! {
     fn timestamp_tz_plus_hh_colon_mm_roundtrip(dt in datetime_strategy(), offset in offset_secs_strategy()) {
         let utc = Utc.from_utc_datetime(&dt);
         let local = fmt_local(utc, offset);
-        let (sign, h, m) = offset_parts(offset);
+        let (sign, h, m, _s) = offset_parts(offset);
         let text = format!("{local}{sign}{h:02}:{m:02}");
         let got = parse_timestamp_tz(&text)
             .unwrap_or_else(|| panic!("parse_timestamp_tz +hh:mm: {text:?}"));
+        prop_assert_eq!(got, utc);
+    }
+
+    #[test]
+    fn timestamp_tz_plus_hh_colon_mm_colon_ss_roundtrip(dt in datetime_strategy(), offset in second_offset_secs_strategy()) {
+        let utc = Utc.from_utc_datetime(&dt);
+        let local = fmt_local(utc, offset);
+        let (sign, h, m, s) = offset_parts(offset);
+        let text = format!("{local}{sign}{h:02}:{m:02}:{s:02}");
+        let got = parse_timestamp_tz(&text)
+            .unwrap_or_else(|| panic!("parse_timestamp_tz +hh:mm:ss: {text:?}"));
         prop_assert_eq!(got, utc);
     }
 
@@ -130,6 +161,37 @@ proptest! {
         let got = parse_time(&text)
             .unwrap_or_else(|| panic!("parse_time: {text:?}"));
         prop_assert_eq!(got, t);
+    }
+
+    #[test]
+    fn date_pg_full_range_roundtrip(d in full_range_date_strategy()) {
+        let (date, era) = pg_date(d);
+        let text = format!("{date}{era}");
+        prop_assert_eq!(parse_date(&text), Some(d), "{}", text);
+    }
+
+    #[test]
+    fn timestamp_pg_full_range_roundtrip(d in full_range_date_strategy(), t in time_strategy()) {
+        let (date, era) = pg_date(d);
+        let time = strip_frac_zeros(&t.format("%H:%M:%S%.6f").to_string());
+        let text = format!("{date} {time}{era}");
+        prop_assert_eq!(parse_timestamp(&text), Some(d.and_time(t)), "{}", text);
+    }
+
+    #[test]
+    fn timestamp_tz_pg_full_range_roundtrip(
+        d in full_range_date_strategy(),
+        t in time_strategy(),
+        offset in second_offset_secs_strategy(),
+    ) {
+        let local = d.and_time(t);
+        let utc = FixedOffset::east_opt(offset).unwrap().from_local_datetime(&local).single();
+        prop_assume!(utc.is_some());
+        let (date, era) = pg_date(d);
+        let time = strip_frac_zeros(&t.format("%H:%M:%S%.6f").to_string());
+        let (sign, h, m, s) = offset_parts(offset);
+        let text = format!("{date} {time}{sign}{h:02}:{m:02}:{s:02}{era}");
+        prop_assert_eq!(parse_timestamp_tz(&text), utc.map(|dt| dt.with_timezone(&Utc)), "{}", text);
     }
 }
 
