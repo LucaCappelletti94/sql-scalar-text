@@ -25,6 +25,10 @@ fn offset_secs_strategy() -> impl Strategy<Value = i32> {
     (-1439i32..=1439).prop_map(|m| m * 60)
 }
 
+fn second_offset_secs_strategy() -> impl Strategy<Value = i32> {
+    -86_399i32..=86_399
+}
+
 fn whole_hour_offset_secs_strategy() -> impl Strategy<Value = i32> {
     (-23i32..=23).prop_map(|h| h * 3600)
 }
@@ -48,12 +52,13 @@ fn fmt_local(utc: chrono::DateTime<Utc>, offset: i32) -> String {
     strip_frac_zeros(&local.format("%Y-%m-%d %H:%M:%S%.6f").to_string())
 }
 
-fn offset_parts(offset: i32) -> (char, u32, u32) {
+fn offset_parts(offset: i32) -> (char, u32, u32, u32) {
     let sign = if offset >= 0 { '+' } else { '-' };
     let abs = offset.unsigned_abs();
     let h = abs / 3600;
     let m = (abs % 3600) / 60;
-    (sign, h, m)
+    let s = abs % 60;
+    (sign, h, m, s)
 }
 
 proptest! {
@@ -87,7 +92,7 @@ proptest! {
     fn timestamp_tz_plus_hh_roundtrip(dt in datetime_strategy(), offset in whole_hour_offset_secs_strategy()) {
         let utc = Utc.from_utc_datetime(&dt);
         let local = fmt_local(utc, offset);
-        let (sign, h, _m) = offset_parts(offset);
+        let (sign, h, _m, _s) = offset_parts(offset);
         let text = format!("{local}{sign}{h:02}");
         let got = parse_timestamp_tz(&text)
             .unwrap_or_else(|| panic!("parse_timestamp_tz +hh: {text:?}"));
@@ -98,7 +103,7 @@ proptest! {
     fn timestamp_tz_plus_hhmm_roundtrip(dt in datetime_strategy(), offset in offset_secs_strategy()) {
         let utc = Utc.from_utc_datetime(&dt);
         let local = fmt_local(utc, offset);
-        let (sign, h, m) = offset_parts(offset);
+        let (sign, h, m, _s) = offset_parts(offset);
         let text = format!("{local}{sign}{h:02}{m:02}");
         let got = parse_timestamp_tz(&text)
             .unwrap_or_else(|| panic!("parse_timestamp_tz +hhmm: {text:?}"));
@@ -109,10 +114,21 @@ proptest! {
     fn timestamp_tz_plus_hh_colon_mm_roundtrip(dt in datetime_strategy(), offset in offset_secs_strategy()) {
         let utc = Utc.from_utc_datetime(&dt);
         let local = fmt_local(utc, offset);
-        let (sign, h, m) = offset_parts(offset);
+        let (sign, h, m, _s) = offset_parts(offset);
         let text = format!("{local}{sign}{h:02}:{m:02}");
         let got = parse_timestamp_tz(&text)
             .unwrap_or_else(|| panic!("parse_timestamp_tz +hh:mm: {text:?}"));
+        prop_assert_eq!(got, utc);
+    }
+
+    #[test]
+    fn timestamp_tz_plus_hh_colon_mm_colon_ss_roundtrip(dt in datetime_strategy(), offset in second_offset_secs_strategy()) {
+        let utc = Utc.from_utc_datetime(&dt);
+        let local = fmt_local(utc, offset);
+        let (sign, h, m, s) = offset_parts(offset);
+        let text = format!("{local}{sign}{h:02}:{m:02}:{s:02}");
+        let got = parse_timestamp_tz(&text)
+            .unwrap_or_else(|| panic!("parse_timestamp_tz +hh:mm:ss: {text:?}"));
         prop_assert_eq!(got, utc);
     }
 
