@@ -143,6 +143,44 @@ fn pg_timestamptz_local_mean_time_offsets() {
 }
 
 #[test]
+fn pg_years_past_9999_and_before_1_ad() {
+    let mut conn = pg_conn();
+    set_timezone(&mut conn, "UTC");
+    let ymd = |y, m, d| NaiveDate::from_ymd_opt(y, m, d).unwrap();
+
+    let tz_cases = [
+        (
+            "'9999-12-31 23:00:00-01'::timestamptz",
+            ymd(10000, 1, 1).and_hms_opt(0, 0, 0).unwrap(),
+        ),
+        (
+            "'0001-01-01 00:30:00+01'::timestamptz",
+            ymd(0, 12, 31).and_hms_opt(23, 30, 0).unwrap(),
+        ),
+    ];
+    for (expr, expected) in tz_cases {
+        let text = pg_text(&mut conn, &format!("{expr}::text"));
+        assert_eq!(
+            parse_timestamp_tz(&text),
+            Some(expected.and_utc()),
+            "{text:?}"
+        );
+    }
+
+    let text = pg_text(&mut conn, "'0044-03-15 12:00:00 BC'::timestamp::text");
+    let expected = ymd(-43, 3, 15).and_hms_opt(12, 0, 0).unwrap();
+    assert_eq!(parse_timestamp(&text), Some(expected), "{text:?}");
+
+    for (expr, expected) in [
+        ("'123456-01-01'::date", ymd(123_456, 1, 1)),
+        ("'0001-01-01 BC'::date", ymd(0, 1, 1)),
+    ] {
+        let text = pg_text(&mut conn, &format!("{expr}::text"));
+        assert_eq!(parse_date(&text), Some(expected), "{text:?}");
+    }
+}
+
+#[test]
 fn pg_scalar_types() {
     let mut conn = pg_conn();
 
